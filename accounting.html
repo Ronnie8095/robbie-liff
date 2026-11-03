@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-<title>記一筆</title>
+<title>記帳</title>
 <!--
   Robbie LIFF 記帳表單
   - 送出時以使用者身分傳「/記帳」多行逐筆文字到聊天室，由 webhook 既有的 parse_multi_entry_text 解析
@@ -60,6 +60,13 @@
   .item { display: grid; grid-template-columns: 1fr 64px 96px 32px; gap: 8px; align-items: center; margin-bottom: 8px; }
   .item .del { border: none; background: none; color: var(--danger); font-size: 22px; cursor: pointer; padding: 0; }
   .head { display: grid; grid-template-columns: 1fr 64px 96px 32px; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  /* 記多筆：每筆各自的日期（記一筆、修改模式用上方共用日期） */
+  .item .rowdate { grid-column: 1 / -1; display: none; }
+  body.multi .item .rowdate { display: block; }
+  body.multi .item { padding-top: 10px; border-top: 1px solid var(--line); }
+  body.multi .item:first-child { padding-top: 0; border-top: none; }
+  body.multi #dateCard { display: none; }
+  body.single #addBtn { display: none; }
   .add { width: 100%; font: inherit; padding: 10px; border-radius: 10px; border: 1px dashed var(--line); background: none; color: var(--muted); cursor: pointer; }
   .total { text-align: right; color: var(--muted); margin-top: 6px; }
   .total b { color: var(--text); font-size: 18px; }
@@ -78,9 +85,13 @@
 </head>
 <body>
 <main>
-  <h1>記一筆</h1>
+  <h1 id="title">記帳</h1>
 
-  <div class="card">
+  <div class="card" id="modeCard">
+    <div class="seg" id="modes"></div>
+  </div>
+
+  <div class="card" id="dateCard">
     <div class="row">
       <div><div class="label">日期</div><input type="date" id="date"></div>
       <div><div class="label">時間</div><input type="time" id="time"></div>
@@ -115,17 +126,30 @@
   const PURCHASERS = ["Ronnie", "Jenny"];
   const QUICK_ITEMS = ["早餐", "午餐", "晚餐", "便當", "咖啡", "飲料", "水果", "加油", "停車費", "捷運", "衛生紙", "日用品"];
 
+  const NO_PURCHASER = "不指定";
+  const PURCHASER_OPTIONS = [...PURCHASERS, NO_PURCHASER];
+
   const $ = (id) => document.getElementById(id);
   const pad = (n) => String(n).padStart(2, "0");
   let purchaser = PURCHASERS[0];
   let liffReady = false;
+  // 修改模式：由收據預覽的「✏️ 修改」按鈕開啟，網址帶 ?edit=<base64url JSON>，送出時改用 /記帳修改
+  let editMode = false;
+  // 記一筆：單筆、共用日期時間；記多筆：可多筆、每筆各自的日期
+  const MODES = { single: "記一筆", multi: "記多筆" };
+  let mode = "single";
+
+  const today = () => {
+    const now = new Date();
+    return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  };
 
   function initDefaults() {
     const now = new Date();
-    $("date").value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    $("date").value = today();
     $("time").value = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
     try { purchaser = localStorage.getItem("purchaser") || purchaser; } catch (e) {}
-    if (!PURCHASERS.includes(purchaser)) purchaser = PURCHASERS[0];
+    if (!PURCHASER_OPTIONS.includes(purchaser)) purchaser = PURCHASERS[0];
     renderPurchasers();
     $("chips").innerHTML = "";
     QUICK_ITEMS.forEach((name) => {
@@ -135,11 +159,44 @@
       $("chips").appendChild(b);
     });
     addItem("");
+    let saved = null;
+    try { saved = localStorage.getItem("mode"); } catch (e) {}
+    setMode(MODES[saved] ? saved : "single");
+  }
+
+  function setMode(next) {
+    const rows = [...$("items").querySelectorAll(".item")];
+    const filled = rows.filter((r) => r.querySelector(".name").value || r.querySelector(".price").value);
+    if (next === "single" && filled.length > 1 && !confirm(`切換成「記一筆」只會保留第一筆，其餘 ${filled.length - 1} 筆會刪除，確定嗎？`)) {
+      return;
+    }
+    if (next === "single") {
+      rows.slice(1).forEach((r) => r.remove());
+      // 帶入第一筆的日期，避免切換後日期跑掉
+      const d = rows[0] && rows[0].querySelector(".rowdate").value;
+      if (d) $("date").value = d;
+    } else {
+      rows.forEach((r) => { if (!r.querySelector(".rowdate").value) r.querySelector(".rowdate").value = $("date").value || today(); });
+    }
+    mode = next;
+    try { localStorage.setItem("mode", next); } catch (e) {}
+    document.body.classList.toggle("multi", mode === "multi");
+    document.body.classList.toggle("single", mode === "single");
+    $("modes").innerHTML = "";
+    Object.entries(MODES).forEach(([key, label]) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = label;
+      b.className = key === mode ? "on" : "";
+      b.onclick = () => { if (key !== mode) setMode(key); };
+      $("modes").appendChild(b);
+    });
+    $("title").textContent = MODES[mode];
+    updateSum();
   }
 
   function renderPurchasers() {
     $("purchasers").innerHTML = "";
-    PURCHASERS.forEach((name) => {
+    PURCHASER_OPTIONS.forEach((name) => {
       const b = document.createElement("button");
       b.type = "button"; b.textContent = name;
       b.className = name === purchaser ? "on" : "";
@@ -156,7 +213,9 @@
     // 點常用品項時，若最後一列是空白就直接填進去
     const rows = $("items").querySelectorAll(".item");
     const last = rows[rows.length - 1];
-    if (name && last && !last.querySelector(".name").value && !last.querySelector(".price").value) {
+    // 記一筆只有一列：常用品項直接換掉品名
+    const singleOnly = name && mode === "single" && !editMode && last;
+    if (singleOnly || (name && last && !last.querySelector(".name").value && !last.querySelector(".price").value)) {
       last.querySelector(".name").value = name;
       if (focusPrice) last.querySelector(".price").focus();
       return;
@@ -164,11 +223,14 @@
     const row = document.createElement("div");
     row.className = "item";
     row.innerHTML =
+      '<input class="rowdate" type="date" aria-label="日期">' +
       '<input class="name" placeholder="品名" maxlength="40">' +
       '<input class="qty" type="number" inputmode="numeric" min="1" value="1">' +
-      '<input class="price" type="number" inputmode="numeric" min="0" placeholder="元">' +
+      '<input class="price" type="number" inputmode="numeric" placeholder="元">' +
       '<button class="del" type="button" aria-label="刪除">×</button>';
     row.querySelector(".name").value = name || "";
+    // 新的一筆沿用上一筆的日期，方便連續輸入同一天的品項
+    row.querySelector(".rowdate").value = (last && last.querySelector(".rowdate").value) || $("date").value || today();
     row.querySelector(".price").oninput = updateSum;
     row.querySelector(".del").onclick = () => {
       row.remove();
@@ -188,9 +250,14 @@
       const price = parseInt(row.querySelector(".price").value, 10);
       const qty = Math.max(1, parseInt(row.querySelector(".qty").value, 10) || 1);
       if (!name && isNaN(price)) continue;
-      if (!name || isNaN(price) || price < 0) return { error: "每一筆都要填品名與金額" };
+      // 金額可為負數（收據上的折扣）
+      if (!name || isNaN(price)) return { error: "每一筆都要填品名與金額" };
+      // 一般記帳走既有文字解析，不支援負數；只有收據修改模式可以送折扣
+      if (!editMode && price < 0) return { error: "手動記帳請直接填折扣後的金額" };
       if (/^\d+$/.test(name)) return { error: `品名不能只有數字：${name}` };
-      items.push({ name, qty, price });
+      const day = row.querySelector(".rowdate").value;
+      if (mode === "multi" && !editMode && !day) return { error: `請選擇「${name}」的日期` };
+      items.push({ name, qty, price, day });
     }
     if (!items.length) return { error: "請至少填一筆" };
     return { items };
@@ -203,9 +270,66 @@
   }
 
   function buildText(items) {
-    const header = `${$("date").value} ${$("time").value || ""} ${purchaser}`.replace(/\s+/g, " ").trim();
+    const who = purchaser === NO_PURCHASER ? "" : purchaser;
     const lines = items.map((it) => (it.qty > 1 ? `${it.name} x${it.qty} ${it.price}` : `${it.name} ${it.price}`));
-    return ["/記帳", header, ...lines].join("\n");
+    if (mode === "multi" && !editMode) {
+      // 記多筆：首行只放購物人（情境行），每行前面帶自己的日期
+      return ["/記帳", ...(who ? [who] : []), ...items.map((it, i) => `${it.day} ${lines[i]}`)].join("\n");
+    }
+    const header = `${$("date").value} ${$("time").value || ""} ${who}`.replace(/\s+/g, " ").trim();
+    return [editMode ? "/記帳修改" : "/記帳", header, ...lines].join("\n");
+  }
+
+  function readEditParam() {
+    const params = new URLSearchParams(location.search);
+    let value = params.get("edit");
+    // 從 liff.line.me 開啟時，查詢參數會先包在 liff.state 裡
+    const state = params.get("liff.state");
+    if (!value && state && state.indexOf("?") >= 0) {
+      value = new URLSearchParams(state.slice(state.indexOf("?") + 1)).get("edit");
+    }
+    return value;
+  }
+
+  function decodePayload(s) {
+    s = s.replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    const bytes = Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+    return JSON.parse(new TextDecoder().decode(bytes));
+  }
+
+  function applyEditMode() {
+    if (editMode) return;
+    const raw = readEditParam();
+    if (!raw) return;
+    let data;
+    try { data = decodePayload(raw); } catch (e) { return showMsg("無法讀取收據辨識結果，請改用手動輸入", true); }
+    if (!data || !Array.isArray(data.i) || !data.i.length) return;
+
+    editMode = true;
+    // 修改模式固定用共用日期、可多筆，隱藏記一筆／記多筆切換
+    $("modeCard").hidden = true;
+    document.body.classList.remove("multi", "single");
+    $("title").textContent = "修改收據記帳";
+    $("submitBtn").textContent = "送出修改後的記帳";
+    const m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?/.exec(data.d || "");
+    if (m) {
+      $("date").value = `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
+      $("time").value = m[4] ? `${pad(m[4])}:${m[5]}` : "";
+    }
+    purchaser = PURCHASERS.includes(data.p) ? data.p : NO_PURCHASER;
+    renderPurchasers();
+    $("items").innerHTML = "";
+    data.i.forEach(([name, qty, price]) => {
+      addItem("");
+      const rows = $("items").querySelectorAll(".item");
+      const row = rows[rows.length - 1];
+      row.querySelector(".name").value = name;
+      row.querySelector(".qty").value = qty || 1;
+      row.querySelector(".price").value = price;
+    });
+    document.activeElement && document.activeElement.blur();
+    updateSum();
   }
 
   function showMsg(text, isErr) {
@@ -216,7 +340,7 @@
 
   async function submit() {
     updateSum();
-    if (!$("date").value) return showMsg("請選擇日期", true);
+    if ((mode !== "multi" || editMode) && !$("date").value) return showMsg("請選擇日期", true);
     const { items, error } = collectItems();
     if (error) return showMsg(error, true);
     const text = buildText(items);
@@ -238,10 +362,11 @@
   $("addBtn").onclick = () => addItem("");
   $("submitBtn").onclick = submit;
   initDefaults();
+  applyEditMode();
 
   if (window.liff && LIFF_ID && LIFF_ID !== "YOUR_LIFF_ID") {
     liff.init({ liffId: LIFF_ID })
-      .then(() => { liffReady = true; })
+      .then(() => { liffReady = true; applyEditMode(); })
       .catch((e) => showMsg("LIFF 初始化失敗：" + (e && e.message ? e.message : e), true));
   }
 </script>
