@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>記一筆</title>
+<!--
+  Robbie LIFF 記帳表單
+  - 送出時以使用者身分傳「/記帳」多行逐筆文字到聊天室，由 webhook 既有的 parse_multi_entry_text 解析
+  - 格式：
+      /記帳
+      2026-11-03 12:30 Ronnie
+      便當 120
+      雞蛋 x2 90        ← 數量 > 1 時加「x數量」，金額為總計
+  - 部署：放到 HTTPS 靜態託管（如 GitHub Pages），LIFF App 的 Endpoint 指向這個網址，Scope 勾 chat_message.write
+-->
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js" charset="utf-8"></script>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --text: #1d1f23; --muted: #6b7280;
+    --line: #e5e7eb; --accent: #06c755; --accent-text: #ffffff; --chip: #eef2f5; --danger: #e5484d;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111315; --card: #1b1e21; --text: #eceef0; --muted: #9aa1a9;
+      --line: #2b2f33; --chip: #262a2e;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111315; --card: #1b1e21; --text: #eceef0; --muted: #9aa1a9;
+    --line: #2b2f33; --chip: #262a2e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", sans-serif;
+  }
+  main { max-width: 520px; margin: 0 auto; padding: 16px 16px 120px; }
+  h1 { font-size: 20px; margin: 4px 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
+  .label { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .row { display: flex; gap: 10px; }
+  .row > * { flex: 1; min-width: 0; }
+  input {
+    width: 100%; font: inherit; color: var(--text); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  }
+  input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .seg { display: flex; gap: 8px; }
+  .seg button {
+    flex: 1; font: inherit; padding: 10px; border-radius: 10px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--bg); color: var(--text);
+  }
+  .seg button.on { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chips button {
+    font: inherit; font-size: 14px; padding: 6px 12px; border-radius: 999px; cursor: pointer;
+    border: none; background: var(--chip); color: var(--text);
+  }
+  .item { display: grid; grid-template-columns: 1fr 64px 96px 32px; gap: 8px; align-items: center; margin-bottom: 8px; }
+  .item .del { border: none; background: none; color: var(--danger); font-size: 22px; cursor: pointer; padding: 0; }
+  .head { display: grid; grid-template-columns: 1fr 64px 96px 32px; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .add { width: 100%; font: inherit; padding: 10px; border-radius: 10px; border: 1px dashed var(--line); background: none; color: var(--muted); cursor: pointer; }
+  .total { text-align: right; color: var(--muted); margin-top: 6px; }
+  .total b { color: var(--text); font-size: 18px; }
+  footer {
+    position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+    background: var(--card); border-top: 1px solid var(--line);
+  }
+  footer button {
+    display: block; width: 100%; max-width: 520px; margin: 0 auto; font: inherit; font-size: 17px; font-weight: 600;
+    padding: 14px; border: none; border-radius: 12px; background: var(--accent); color: var(--accent-text); cursor: pointer;
+  }
+  footer button:disabled { opacity: .5; }
+  #msg { white-space: pre-wrap; font-size: 14px; color: var(--muted); }
+  #msg.err { color: var(--danger); }
+</style>
+</head>
+<body>
+<main>
+  <h1>記一筆</h1>
+
+  <div class="card">
+    <div class="row">
+      <div><div class="label">日期</div><input type="date" id="date"></div>
+      <div><div class="label">時間</div><input type="time" id="time"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="label">購物人</div>
+    <div class="seg" id="purchasers"></div>
+  </div>
+
+  <div class="card">
+    <div class="label">常用品項（點一下加入）</div>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div class="card">
+    <div class="head"><span>品項</span><span>數量</span><span>金額（總計）</span><span></span></div>
+    <div id="items"></div>
+    <button class="add" id="addBtn" type="button">＋ 再加一筆</button>
+    <div class="total">合計 <b id="sum">0</b> 元</div>
+  </div>
+
+  <div class="card" id="msgCard" hidden><div id="msg"></div></div>
+</main>
+<footer><button id="submitBtn" type="button">送出記帳</button></footer>
+
+<script>
+  // 部署前填入 LINE Developers 建立的 LIFF ID
+  const LIFF_ID = "YOUR_LIFF_ID";
+  // 與 scripts/accounting_handler.py 的 PURCHASER_NAMES 一致
+  const PURCHASERS = ["Ronnie", "Jenny"];
+  const QUICK_ITEMS = ["早餐", "午餐", "晚餐", "便當", "咖啡", "飲料", "水果", "加油", "停車費", "捷運", "衛生紙", "日用品"];
+
+  const $ = (id) => document.getElementById(id);
+  const pad = (n) => String(n).padStart(2, "0");
+  let purchaser = PURCHASERS[0];
+  let liffReady = false;
+
+  function initDefaults() {
+    const now = new Date();
+    $("date").value = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+    $("time").value = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    try { purchaser = localStorage.getItem("purchaser") || purchaser; } catch (e) {}
+    if (!PURCHASERS.includes(purchaser)) purchaser = PURCHASERS[0];
+    renderPurchasers();
+    $("chips").innerHTML = "";
+    QUICK_ITEMS.forEach((name) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = name;
+      b.onclick = () => addItem(name, true);
+      $("chips").appendChild(b);
+    });
+    addItem("");
+  }
+
+  function renderPurchasers() {
+    $("purchasers").innerHTML = "";
+    PURCHASERS.forEach((name) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = name;
+      b.className = name === purchaser ? "on" : "";
+      b.onclick = () => {
+        purchaser = name;
+        try { localStorage.setItem("purchaser", name); } catch (e) {}
+        renderPurchasers();
+      };
+      $("purchasers").appendChild(b);
+    });
+  }
+
+  function addItem(name, focusPrice) {
+    // 點常用品項時，若最後一列是空白就直接填進去
+    const rows = $("items").querySelectorAll(".item");
+    const last = rows[rows.length - 1];
+    if (name && last && !last.querySelector(".name").value && !last.querySelector(".price").value) {
+      last.querySelector(".name").value = name;
+      if (focusPrice) last.querySelector(".price").focus();
+      return;
+    }
+    const row = document.createElement("div");
+    row.className = "item";
+    row.innerHTML =
+      '<input class="name" placeholder="品名" maxlength="40">' +
+      '<input class="qty" type="number" inputmode="numeric" min="1" value="1">' +
+      '<input class="price" type="number" inputmode="numeric" min="0" placeholder="元">' +
+      '<button class="del" type="button" aria-label="刪除">×</button>';
+    row.querySelector(".name").value = name || "";
+    row.querySelector(".price").oninput = updateSum;
+    row.querySelector(".del").onclick = () => {
+      row.remove();
+      if (!$("items").children.length) addItem("");
+      updateSum();
+    };
+    $("items").appendChild(row);
+    (focusPrice ? row.querySelector(".price") : row.querySelector(".name")).focus();
+  }
+
+  function collectItems() {
+    const items = [];
+    for (const row of $("items").querySelectorAll(".item")) {
+      // 品名不可含換行、逗號（會被解析器當成分隔），也不可含購物人名稱
+      let name = row.querySelector(".name").value.replace(/[\n\r,，、]/g, " ").trim();
+      PURCHASERS.forEach((p) => { name = name.replace(new RegExp(p, "ig"), "").trim(); });
+      const price = parseInt(row.querySelector(".price").value, 10);
+      const qty = Math.max(1, parseInt(row.querySelector(".qty").value, 10) || 1);
+      if (!name && isNaN(price)) continue;
+      if (!name || isNaN(price) || price < 0) return { error: "每一筆都要填品名與金額" };
+      if (/^\d+$/.test(name)) return { error: `品名不能只有數字：${name}` };
+      items.push({ name, qty, price });
+    }
+    if (!items.length) return { error: "請至少填一筆" };
+    return { items };
+  }
+
+  function updateSum() {
+    let sum = 0;
+    $("items").querySelectorAll(".price").forEach((el) => { sum += parseInt(el.value, 10) || 0; });
+    $("sum").textContent = sum.toLocaleString();
+  }
+
+  function buildText(items) {
+    const header = `${$("date").value} ${$("time").value || ""} ${purchaser}`.replace(/\s+/g, " ").trim();
+    const lines = items.map((it) => (it.qty > 1 ? `${it.name} x${it.qty} ${it.price}` : `${it.name} ${it.price}`));
+    return ["/記帳", header, ...lines].join("\n");
+  }
+
+  function showMsg(text, isErr) {
+    $("msgCard").hidden = false;
+    $("msg").textContent = text;
+    $("msg").className = isErr ? "err" : "";
+  }
+
+  async function submit() {
+    updateSum();
+    if (!$("date").value) return showMsg("請選擇日期", true);
+    const { items, error } = collectItems();
+    if (error) return showMsg(error, true);
+    const text = buildText(items);
+
+    // 不在 LINE 內開啟（例如本機預覽）時，只顯示會送出的文字
+    if (!liffReady || !liff.isInClient()) {
+      return showMsg("預覽模式（未在 LINE 內開啟），將送出：\n\n" + text, false);
+    }
+    $("submitBtn").disabled = true;
+    try {
+      await liff.sendMessages([{ type: "text", text }]);
+      liff.closeWindow();
+    } catch (e) {
+      $("submitBtn").disabled = false;
+      showMsg("送出失敗：" + (e && e.message ? e.message : e) + "\n請確認 LIFF 已勾選 chat_message.write，且是從聊天室開啟。", true);
+    }
+  }
+
+  $("addBtn").onclick = () => addItem("");
+  $("submitBtn").onclick = submit;
+  initDefaults();
+
+  if (window.liff && LIFF_ID && LIFF_ID !== "YOUR_LIFF_ID") {
+    liff.init({ liffId: LIFF_ID })
+      .then(() => { liffReady = true; })
+      .catch((e) => showMsg("LIFF 初始化失敗：" + (e && e.message ? e.message : e), true));
+  }
+</script>
+</body>
+</html>
