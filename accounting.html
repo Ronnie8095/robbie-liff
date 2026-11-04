@@ -6,12 +6,14 @@
 <title>記帳</title>
 <!--
   Robbie LIFF 記帳表單
+  - 一個表單可有多組（每組一個日期＋購物人），每組可記一筆或按「再加一筆」記多筆
   - 送出時以使用者身分傳「/記帳」多行逐筆文字到聊天室，由 webhook 既有的 parse_multi_entry_text 解析
-  - 格式：
+  - 格式（每行帶自己的日期與購物人；不指定購物人就省略）：
       /記帳
-      2026-11-03 12:30 Ronnie
-      便當 120
-      雞蛋 x2 90        ← 數量 > 1 時加「x數量」，金額為總計
+      2026-11-03 Ronnie 便當 120
+      2026-11-03 Ronnie 雞蛋 x2 90     ← 數量 > 1 時加「x數量」，金額為總計
+      2026-11-04 Jenny 咖啡 60
+  - 修改模式：由收據預覽的「✏️ 修改」開啟（網址帶 ?edit=<base64url JSON>），只有一組，送出「/記帳修改」，可填負數折扣
   - 部署：放到 HTTPS 靜態託管（如 GitHub Pages），LIFF App 的 Endpoint 指向這個網址，Scope 勾 chat_message.write
 -->
 <script src="https://static.line-scdn.net/liff/edge/2/sdk.js" charset="utf-8"></script>
@@ -38,9 +40,8 @@
   main { max-width: 520px; margin: 0 auto; padding: 16px 16px 120px; }
   h1 { font-size: 20px; margin: 4px 0 16px; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
-  .label { font-size: 13px; color: var(--muted); margin-bottom: 6px; }
-  .row { display: flex; gap: 10px; }
-  .row > * { flex: 1; min-width: 0; }
+  .label { font-size: 13px; color: var(--muted); margin: 10px 0 6px; }
+  .label:first-child { margin-top: 0; }
   input {
     width: 100%; font: inherit; color: var(--text); background: var(--bg);
     border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
@@ -57,18 +58,21 @@
     font: inherit; font-size: 14px; padding: 6px 12px; border-radius: 999px; cursor: pointer;
     border: none; background: var(--chip); color: var(--text);
   }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .group.active { border-color: var(--accent); }
+  .ghead { display: flex; justify-content: space-between; align-items: center; }
+  .gtitle { font-weight: 600; }
+  .gdel { border: none; background: none; color: var(--danger); font: inherit; font-size: 14px; cursor: pointer; padding: 0; }
   .item { display: grid; grid-template-columns: 1fr 64px 96px 32px; gap: 8px; align-items: center; margin-bottom: 8px; }
   .item .del { border: none; background: none; color: var(--danger); font-size: 22px; cursor: pointer; padding: 0; }
-  .head { display: grid; grid-template-columns: 1fr 64px 96px 32px; gap: 8px; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
-  /* 記多筆：每筆各自的日期（記一筆、修改模式用上方共用日期） */
-  .item .rowdate { grid-column: 1 / -1; display: none; }
-  body.multi .item .rowdate { display: block; }
-  body.multi .item { padding-top: 10px; border-top: 1px solid var(--line); }
-  body.multi .item:first-child { padding-top: 0; border-top: none; }
-  body.multi #dateCard { display: none; }
-  body.single #addBtn { display: none; }
-  .add { width: 100%; font: inherit; padding: 10px; border-radius: 10px; border: 1px dashed var(--line); background: none; color: var(--muted); cursor: pointer; }
-  .total { text-align: right; color: var(--muted); margin-top: 6px; }
+  .head { display: grid; grid-template-columns: 1fr 64px 96px 32px; gap: 8px; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+  .add, .addgroup {
+    display: block; width: 100%; font: inherit; padding: 10px; border-radius: 10px;
+    border: 1px dashed var(--line); background: none; color: var(--muted); cursor: pointer;
+  }
+  .addgroup { margin-bottom: 14px; padding: 12px; }
+  .subtotal { text-align: right; color: var(--muted); font-size: 14px; margin-top: 6px; }
+  .total { text-align: right; color: var(--muted); }
   .total b { color: var(--text); font-size: 18px; }
   footer {
     position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
@@ -87,198 +91,236 @@
 <main>
   <h1 id="title">記帳</h1>
 
-  <div class="card" id="modeCard">
-    <div class="seg" id="modes"></div>
-  </div>
-
-  <div class="card" id="dateCard">
-    <div class="row">
-      <div><div class="label">日期</div><input type="date" id="date"></div>
-      <div><div class="label">時間</div><input type="time" id="time"></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="label">購物人</div>
-    <div class="seg" id="purchasers"></div>
-  </div>
-
-  <div class="card">
-    <div class="label">常用品項（點一下加入）</div>
+  <div class="card" id="chipCard">
+    <div class="label">常用品項（點一下加到目前這組）</div>
     <div class="chips" id="chips"></div>
   </div>
 
-  <div class="card">
-    <div class="head"><span>品項</span><span>數量</span><span>金額（總計）</span><span></span></div>
-    <div id="items"></div>
-    <button class="add" id="addBtn" type="button">＋ 再加一筆</button>
-    <div class="total">合計 <b id="sum">0</b> 元</div>
-  </div>
+  <div id="groups"></div>
+  <button class="addgroup" id="addGroupBtn" type="button">＋ 新增一組（不同日期或購物人）</button>
+
+  <div class="card"><div class="total">合計 <b id="sum">0</b> 元</div></div>
 
   <div class="card" id="msgCard" hidden><div id="msg"></div></div>
 </main>
 <footer><button id="submitBtn" type="button">送出記帳</button></footer>
+
+<template id="groupTpl">
+  <section class="card group">
+    <div class="ghead"><span class="gtitle"></span><button class="gdel" type="button">刪除這組</button></div>
+    <div class="label">日期</div>
+    <input class="gdate" type="date">
+    <div class="label">購物人</div>
+    <div class="seg gwho"></div>
+    <div class="head"><span>品項</span><span>數量</span><span>金額（總計）</span><span></span></div>
+    <div class="items"></div>
+    <button class="add" type="button">＋ 再加一筆</button>
+    <div class="subtotal">小計 <span class="gsum">0</span> 元</div>
+  </section>
+</template>
 
 <script>
   // 部署前填入 LINE Developers 建立的 LIFF ID
   const LIFF_ID = "2012357701-tmkTBOo3";
   // 與 scripts/accounting_handler.py 的 PURCHASER_NAMES 一致
   const PURCHASERS = ["Ronnie", "Jenny"];
-  const QUICK_ITEMS = ["早餐", "午餐", "晚餐", "便當", "咖啡", "飲料", "水果", "加油", "停車費", "捷運", "衛生紙", "日用品"];
-
   const NO_PURCHASER = "不指定";
   const PURCHASER_OPTIONS = [...PURCHASERS, NO_PURCHASER];
+  const QUICK_ITEMS = ["早餐", "午餐", "晚餐", "便當", "咖啡", "飲料", "水果", "加油", "停車費", "捷運", "衛生紙", "日用品"];
 
   const $ = (id) => document.getElementById(id);
   const pad = (n) => String(n).padStart(2, "0");
-  let purchaser = PURCHASERS[0];
-  let liffReady = false;
-  // 修改模式：由收據預覽的「✏️ 修改」按鈕開啟，網址帶 ?edit=<base64url JSON>，送出時改用 /記帳修改
-  let editMode = false;
-  // 記一筆：單筆、共用日期時間；記多筆：可多筆、每筆各自的日期
-  const MODES = { single: "記一筆", multi: "記多筆" };
-  let mode = "single";
-
   const today = () => {
     const now = new Date();
     return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
   };
+  let liffReady = false;
+  // 修改模式：由收據預覽的「✏️ 修改」按鈕開啟，送出時改用 /記帳修改
+  let editMode = false;
+  let activeGroup = null;
 
-  function initDefaults() {
-    const now = new Date();
-    $("date").value = today();
-    $("time").value = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-    try { purchaser = localStorage.getItem("purchaser") || purchaser; } catch (e) {}
-    if (!PURCHASER_OPTIONS.includes(purchaser)) purchaser = PURCHASERS[0];
-    renderPurchasers();
-    $("chips").innerHTML = "";
-    QUICK_ITEMS.forEach((name) => {
-      const b = document.createElement("button");
-      b.type = "button"; b.textContent = name;
-      b.onclick = () => addItem(name, true);
-      $("chips").appendChild(b);
-    });
-    addItem("");
-    let saved = null;
-    try { saved = localStorage.getItem("mode"); } catch (e) {}
-    setMode(MODES[saved] ? saved : "single");
+  // ── 組（日期＋購物人） ──
+
+  const groups = () => [...$("groups").querySelectorAll(".group")];
+
+  function setActive(group) {
+    activeGroup = group;
+    groups().forEach((g) => g.classList.toggle("active", g === group && groups().length > 1));
   }
 
-  function setMode(next) {
-    const rows = [...$("items").querySelectorAll(".item")];
-    const filled = rows.filter((r) => r.querySelector(".name").value || r.querySelector(".price").value);
-    if (next === "single" && filled.length > 1 && !confirm(`切換成「記一筆」只會保留第一筆，其餘 ${filled.length - 1} 筆會刪除，確定嗎？`)) {
-      return;
-    }
-    if (next === "single") {
-      rows.slice(1).forEach((r) => r.remove());
-      // 帶入第一筆的日期，避免切換後日期跑掉
-      const d = rows[0] && rows[0].querySelector(".rowdate").value;
-      if (d) $("date").value = d;
-    } else {
-      rows.forEach((r) => { if (!r.querySelector(".rowdate").value) r.querySelector(".rowdate").value = $("date").value || today(); });
-    }
-    mode = next;
-    try { localStorage.setItem("mode", next); } catch (e) {}
-    document.body.classList.toggle("multi", mode === "multi");
-    document.body.classList.toggle("single", mode === "single");
-    $("modes").innerHTML = "";
-    Object.entries(MODES).forEach(([key, label]) => {
-      const b = document.createElement("button");
-      b.type = "button"; b.textContent = label;
-      b.className = key === mode ? "on" : "";
-      b.onclick = () => { if (key !== mode) setMode(key); };
-      $("modes").appendChild(b);
-    });
-    $("title").textContent = MODES[mode];
-    updateSum();
-  }
-
-  function renderPurchasers() {
-    $("purchasers").innerHTML = "";
+  function renderWho(group) {
+    const box = group.querySelector(".gwho");
+    box.innerHTML = "";
     PURCHASER_OPTIONS.forEach((name) => {
       const b = document.createElement("button");
       b.type = "button"; b.textContent = name;
-      b.className = name === purchaser ? "on" : "";
+      b.className = name === group.dataset.who ? "on" : "";
       b.onclick = () => {
-        purchaser = name;
-        try { localStorage.setItem("purchaser", name); } catch (e) {}
-        renderPurchasers();
+        group.dataset.who = name;
+        if (group === groups()[0]) { try { localStorage.setItem("purchaser", name); } catch (e) {} }
+        renderWho(group);
       };
-      $("purchasers").appendChild(b);
+      box.appendChild(b);
     });
   }
 
-  function addItem(name, focusPrice) {
-    // 點常用品項時，若最後一列是空白就直接填進去
-    const rows = $("items").querySelectorAll(".item");
+  function renumber() {
+    const list = groups();
+    list.forEach((g, i) => {
+      g.querySelector(".gtitle").textContent = list.length > 1 ? `第 ${i + 1} 組` : "記帳明細";
+      g.querySelector(".gdel").hidden = list.length === 1 || editMode;
+    });
+    setActive(list.includes(activeGroup) ? activeGroup : list[list.length - 1]);
+  }
+
+  function addGroup() {
+    const prev = groups()[groups().length - 1];
+    const group = $("groupTpl").content.firstElementChild.cloneNode(true);
+    // 新的一組：日期沿用上一組；購物人預設換成另一位，方便「同一天不同人」
+    group.querySelector(".gdate").value = prev ? prev.querySelector(".gdate").value : today();
+    if (prev) {
+      group.dataset.who = PURCHASERS.find((p) => p !== prev.dataset.who) || PURCHASERS[0];
+    } else {
+      let saved = null;
+      try { saved = localStorage.getItem("purchaser"); } catch (e) {}
+      group.dataset.who = PURCHASER_OPTIONS.includes(saved) ? saved : PURCHASERS[0];
+    }
+    renderWho(group);
+    group.addEventListener("focusin", () => setActive(group));
+    group.addEventListener("click", () => setActive(group));
+    group.querySelector(".add").onclick = () => addItem(group, "");
+    group.querySelector(".gdel").onclick = (ev) => {
+      ev.stopPropagation();
+      const filled = [...group.querySelectorAll(".item")].some(rowFilled);
+      if (filled && !confirm("確定刪除這一組？")) return;
+      group.remove();
+      renumber(); updateSum();
+    };
+    $("groups").appendChild(group);
+    addItem(group, "");
+    renumber();
+    setActive(group);
+    return group;
+  }
+
+  // ── 品項列 ──
+
+  const rowFilled = (row) => row.querySelector(".name").value || row.querySelector(".price").value;
+
+  function addItem(group, name, focusPrice) {
+    const rows = group.querySelectorAll(".item");
     const last = rows[rows.length - 1];
-    // 記一筆只有一列：常用品項直接換掉品名
-    const singleOnly = name && mode === "single" && !editMode && last;
-    if (singleOnly || (name && last && !last.querySelector(".name").value && !last.querySelector(".price").value)) {
+    // 點常用品項時，若最後一列是空白就直接填進去
+    if (name && last && !rowFilled(last)) {
       last.querySelector(".name").value = name;
       if (focusPrice) last.querySelector(".price").focus();
-      return;
+      return last;
     }
     const row = document.createElement("div");
     row.className = "item";
     row.innerHTML =
-      '<input class="rowdate" type="date" aria-label="日期">' +
       '<input class="name" placeholder="品名" maxlength="40">' +
       '<input class="qty" type="number" inputmode="numeric" min="1" value="1">' +
       '<input class="price" type="number" inputmode="numeric" placeholder="元">' +
       '<button class="del" type="button" aria-label="刪除">×</button>';
     row.querySelector(".name").value = name || "";
-    // 新的一筆沿用上一筆的日期，方便連續輸入同一天的品項
-    row.querySelector(".rowdate").value = (last && last.querySelector(".rowdate").value) || $("date").value || today();
     row.querySelector(".price").oninput = updateSum;
     row.querySelector(".del").onclick = () => {
       row.remove();
-      if (!$("items").children.length) addItem("");
+      if (!group.querySelector(".item")) addItem(group, "");
       updateSum();
     };
-    $("items").appendChild(row);
+    group.querySelector(".items").appendChild(row);
     (focusPrice ? row.querySelector(".price") : row.querySelector(".name")).focus();
-  }
-
-  function collectItems() {
-    const items = [];
-    for (const row of $("items").querySelectorAll(".item")) {
-      // 品名不可含換行、逗號（會被解析器當成分隔），也不可含購物人名稱
-      let name = row.querySelector(".name").value.replace(/[\n\r,，、]/g, " ").trim();
-      PURCHASERS.forEach((p) => { name = name.replace(new RegExp(p, "ig"), "").trim(); });
-      const price = parseInt(row.querySelector(".price").value, 10);
-      const qty = Math.max(1, parseInt(row.querySelector(".qty").value, 10) || 1);
-      if (!name && isNaN(price)) continue;
-      // 金額可為負數（收據上的折扣）
-      if (!name || isNaN(price)) return { error: "每一筆都要填品名與金額" };
-      // 一般記帳走既有文字解析，不支援負數；只有收據修改模式可以送折扣
-      if (!editMode && price < 0) return { error: "手動記帳請直接填折扣後的金額" };
-      if (/^\d+$/.test(name)) return { error: `品名不能只有數字：${name}` };
-      const day = row.querySelector(".rowdate").value;
-      if (mode === "multi" && !editMode && !day) return { error: `請選擇「${name}」的日期` };
-      items.push({ name, qty, price, day });
-    }
-    if (!items.length) return { error: "請至少填一筆" };
-    return { items };
+    return row;
   }
 
   function updateSum() {
-    let sum = 0;
-    $("items").querySelectorAll(".price").forEach((el) => { sum += parseInt(el.value, 10) || 0; });
-    $("sum").textContent = sum.toLocaleString();
+    let total = 0;
+    groups().forEach((g) => {
+      let sub = 0;
+      g.querySelectorAll(".price").forEach((el) => { sub += parseInt(el.value, 10) || 0; });
+      g.querySelector(".gsum").textContent = sub.toLocaleString();
+      total += sub;
+    });
+    $("sum").textContent = total.toLocaleString();
   }
 
-  function buildText(items) {
-    const who = purchaser === NO_PURCHASER ? "" : purchaser;
-    const lines = items.map((it) => (it.qty > 1 ? `${it.name} x${it.qty} ${it.price}` : `${it.name} ${it.price}`));
-    if (mode === "multi" && !editMode) {
-      // 記多筆：首行只放購物人（情境行），每行前面帶自己的日期
-      return ["/記帳", ...(who ? [who] : []), ...items.map((it, i) => `${it.day} ${lines[i]}`)].join("\n");
+  // ── 送出 ──
+
+  function collect() {
+    const result = [];
+    const seen = {};
+    const list = groups();
+    for (let gi = 0; gi < list.length; gi++) {
+      const g = list[gi];
+      const label = list.length > 1 ? `第 ${gi + 1} 組` : "";
+      const items = [];
+      for (const row of g.querySelectorAll(".item")) {
+        // 品名不可含換行、逗號（會被解析器當成分隔），也不可含購物人名稱
+        let name = row.querySelector(".name").value.replace(/[\n\r,，、]/g, " ").trim();
+        PURCHASERS.forEach((p) => { name = name.replace(new RegExp(p, "ig"), "").trim(); });
+        const price = parseInt(row.querySelector(".price").value, 10);
+        const qty = Math.max(1, parseInt(row.querySelector(".qty").value, 10) || 1);
+        if (!name && isNaN(price)) continue;
+        if (!name || isNaN(price)) return { error: `${label}每一筆都要填品名與金額` };
+        // 一般記帳走既有文字解析，不支援負數；只有收據修改模式可以送折扣
+        if (!editMode && price < 0) return { error: "手動記帳請直接填折扣後的金額" };
+        if (/^\d+$/.test(name)) return { error: `品名不能只有數字：${name}` };
+        items.push({ name, qty, price });
+      }
+      if (!items.length) continue;
+      const day = g.querySelector(".gdate").value;
+      if (!day) return { error: `${label}請選擇日期` };
+      const who = g.dataset.who === NO_PURCHASER ? "" : g.dataset.who;
+      const key = `${day}|${who}`;
+      if (seen[key]) return { error: `${label}與${seen[key]}的日期和購物人相同，請合併成同一組` };
+      seen[key] = label || "前一組";
+      result.push({ day, who, items });
     }
-    const header = `${$("date").value} ${$("time").value || ""} ${who}`.replace(/\s+/g, " ").trim();
-    return [editMode ? "/記帳修改" : "/記帳", header, ...lines].join("\n");
+    if (!result.length) return { error: "請至少填一筆" };
+    return { groups: result };
   }
+
+  const itemText = (it) => (it.qty > 1 ? `${it.name} x${it.qty} ${it.price}` : `${it.name} ${it.price}`);
+
+  function buildText(list) {
+    if (editMode) {
+      const g = list[0];
+      return ["/記帳修改", `${g.day} ${g.who}`.trim(), ...g.items.map(itemText)].join("\n");
+    }
+    const lines = [];
+    list.forEach((g) => g.items.forEach((it) => lines.push(`${g.day} ${g.who} ${itemText(it)}`.replace(/\s+/g, " "))));
+    return ["/記帳", ...lines].join("\n");
+  }
+
+  function showMsg(text, isErr) {
+    $("msgCard").hidden = false;
+    $("msg").textContent = text;
+    $("msg").className = isErr ? "err" : "";
+  }
+
+  async function submit() {
+    updateSum();
+    const { groups: list, error } = collect();
+    if (error) return showMsg(error, true);
+    const text = buildText(list);
+
+    // 不在 LINE 內開啟（例如本機預覽）時，只顯示會送出的文字
+    if (!liffReady || !liff.isInClient()) {
+      return showMsg("預覽模式（未在 LINE 內開啟），將送出：\n\n" + text, false);
+    }
+    $("submitBtn").disabled = true;
+    try {
+      await liff.sendMessages([{ type: "text", text }]);
+      liff.closeWindow();
+    } catch (e) {
+      $("submitBtn").disabled = false;
+      showMsg("送出失敗：" + (e && e.message ? e.message : e) + "\n請確認 LIFF 已勾選 chat_message.write，且是從聊天室開啟。", true);
+    }
+  }
+
+  // ── 收據修改模式 ──
 
   function readEditParam() {
     const params = new URLSearchParams(location.search);
@@ -307,61 +349,38 @@
     if (!data || !Array.isArray(data.i) || !data.i.length) return;
 
     editMode = true;
-    // 修改模式固定用共用日期、可多筆，隱藏記一筆／記多筆切換
-    $("modeCard").hidden = true;
-    document.body.classList.remove("multi", "single");
     $("title").textContent = "修改收據記帳";
     $("submitBtn").textContent = "送出修改後的記帳";
-    const m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})(?:\s+(\d{1,2}):(\d{2}))?/.exec(data.d || "");
-    if (m) {
-      $("date").value = `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
-      $("time").value = m[4] ? `${pad(m[4])}:${m[5]}` : "";
-    }
-    purchaser = PURCHASERS.includes(data.p) ? data.p : NO_PURCHASER;
-    renderPurchasers();
-    $("items").innerHTML = "";
+    $("addGroupBtn").hidden = true;
+    $("groups").innerHTML = "";
+    const g = addGroup();
+    const m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})/.exec(data.d || "");
+    if (m) g.querySelector(".gdate").value = `${m[1]}-${pad(m[2])}-${pad(m[3])}`;
+    g.dataset.who = PURCHASERS.includes(data.p) ? data.p : NO_PURCHASER;
+    renderWho(g);
+    g.querySelector(".items").innerHTML = "";
     data.i.forEach(([name, qty, price]) => {
-      addItem("");
-      const rows = $("items").querySelectorAll(".item");
-      const row = rows[rows.length - 1];
+      const row = addItem(g, "");
       row.querySelector(".name").value = name;
       row.querySelector(".qty").value = qty || 1;
       row.querySelector(".price").value = price;
     });
+    renumber();
     document.activeElement && document.activeElement.blur();
     updateSum();
   }
 
-  function showMsg(text, isErr) {
-    $("msgCard").hidden = false;
-    $("msg").textContent = text;
-    $("msg").className = isErr ? "err" : "";
-  }
+  // ── 初始化 ──
 
-  async function submit() {
-    updateSum();
-    if ((mode !== "multi" || editMode) && !$("date").value) return showMsg("請選擇日期", true);
-    const { items, error } = collectItems();
-    if (error) return showMsg(error, true);
-    const text = buildText(items);
-
-    // 不在 LINE 內開啟（例如本機預覽）時，只顯示會送出的文字
-    if (!liffReady || !liff.isInClient()) {
-      return showMsg("預覽模式（未在 LINE 內開啟），將送出：\n\n" + text, false);
-    }
-    $("submitBtn").disabled = true;
-    try {
-      await liff.sendMessages([{ type: "text", text }]);
-      liff.closeWindow();
-    } catch (e) {
-      $("submitBtn").disabled = false;
-      showMsg("送出失敗：" + (e && e.message ? e.message : e) + "\n請確認 LIFF 已勾選 chat_message.write，且是從聊天室開啟。", true);
-    }
-  }
-
-  $("addBtn").onclick = () => addItem("");
+  QUICK_ITEMS.forEach((name) => {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = name;
+    b.onclick = () => { addItem(activeGroup || groups()[0], name, true); };
+    $("chips").appendChild(b);
+  });
+  $("addGroupBtn").onclick = () => addGroup();
   $("submitBtn").onclick = submit;
-  initDefaults();
+  addGroup();
   applyEditMode();
 
   if (window.liff && LIFF_ID && LIFF_ID !== "YOUR_LIFF_ID") {
