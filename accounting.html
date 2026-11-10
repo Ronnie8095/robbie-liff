@@ -221,9 +221,11 @@
     row.innerHTML =
       '<input class="name" placeholder="品名" maxlength="40">' +
       '<input class="qty" type="number" inputmode="numeric" min="1" value="1">' +
-      '<input class="price" type="number" inputmode="numeric" placeholder="元">' +
+      '<input class="price" type="number" inputmode="numeric" placeholder="元" autocomplete="off">' +
       '<button class="del" type="button" aria-label="刪除">×</button>';
     row.querySelector(".name").value = name || "";
+    // 新的一筆金額一律留空（不沿用瀏覽器還原／自動填入的上一筆金額）
+    row.querySelector(".price").value = "";
     row.querySelector(".price").oninput = updateSum;
     row.querySelector(".del").onclick = () => {
       row.remove();
@@ -382,6 +384,16 @@
   $("submitBtn").onclick = submit;
   addGroup();
   applyEditMode();
+  // 頁面從快取還原（例如按「再記一筆」重新開啟）時，重置成乾淨的表單；收據修改模式保留預填內容
+  window.addEventListener("pageshow", (ev) => {
+    if (!ev.persisted || editMode) return;
+    $("groups").innerHTML = "";
+    activeGroup = null;
+    addGroup();
+    updateSum();
+    $("msgCard").hidden = true;
+    $("submitBtn").disabled = false;
+  });
 
   if (window.liff && LIFF_ID && LIFF_ID !== "YOUR_LIFF_ID") {
     liff.init({ liffId: LIFF_ID })
